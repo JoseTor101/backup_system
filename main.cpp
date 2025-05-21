@@ -3,24 +3,25 @@
 #include <filesystem>
 using namespace std;
 
-void showHelp() {
+void showHelp(int maxSizeMB = 50) {
     cout << "Uso: compressor -d [carpeta] -o [archivo_zip] [-p número_de_partes]" << endl;
     cout << "  -d : Directorio a comprimir (default: ./test)" << endl;
     cout << "  -o : Archivo ZIP de salida (default: ./output/archivo_comprimido.zip)" << endl;
-    cout << "  -p : Número de partes en las que dividir la compresión (opcional)" << endl;
-    cout << "       Si se omite, se creará un único archivo ZIP" << endl;
+    cout << "  -s : Tamaño máximo por fragmento (en MB)" << endl;
+    cout << "       Si se omite, se utiliza " << maxSizeMB <<" MB por defecto" << endl;
 }
 
 int main(int argc, char *argv[])
 {
+    int maxSizeMB=50; // Tamaño máximo por fragmento en MB
+
     if(argc < 2) {
-        showHelp();
+        showHelp(maxSizeMB);
         return 0;
     }
 
     string sourceDir = "./test";
     string outputZip = "./output/archivo_comprimido.zip";
-    int numParts = 1; // 0 significa sin división
 
     for(int i = 0; i < argc; i++)
     {
@@ -32,11 +33,11 @@ int main(int argc, char *argv[])
         {
             outputZip = argv[i + 1];
         }
-        else if (string(argv[i]) == "-p" && i + 1 < argc)
+        else if (string(argv[i]) == "-s" && i + 1 < argc)
         {
             try {
-                numParts = stoi(argv[i + 1]);
-                if (numParts <= 0) {
+                maxSizeMB = stoi(argv[i + 1]);
+                if (maxSizeMB <= 0) {
                     cerr << "Error: El número de partes debe ser positivo" << endl;
                     return 1;
                 }
@@ -54,9 +55,9 @@ int main(int argc, char *argv[])
 
     bool success;
     
-    if (numParts > 0) {
-        cout << "Comprimiendo en " << numParts << " partes..." << endl;
-        success = compressFolderToSplitZip(sourceDir, outputZip, numParts);
+    if (maxSizeMB > 0) {
+        //cout << "Comprimiendo en " << numParts << " partes..." << endl;
+        success = compressFolderToSplitZip(sourceDir, outputZip, maxSizeMB);
     } 
     if (success)
     {

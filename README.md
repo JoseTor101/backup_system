@@ -34,6 +34,18 @@ make
     - `/nombre_carpeta`: Ignora todo el contenido de una carpeta.
     - `*.extensión`: Ignora todos los archivos con cierta extensión.
 
+- Creación de archivo .info en las partes
+
+```sh
+# Total partes
+# Parte X de Y
+# Formato: ruta_en_zip | ruta_original
+
+archivo1.txt | /ruta/completa/al/archivo1.txt
+carpeta/archivo2.jpg | /ruta/completa/al/carpeta/archivo2.jpg
+```
+...
+
 ## Comandos
 
 **Uso:**  
@@ -44,5 +56,4 @@ make
 **Opciones:**
 - `-d` : Directorio a comprimir (default: `./test`)
 - `-o` : Archivo ZIP de salida (default: `./output/archivo_comprimido.zip`)
-- `-p` : Número de partes en las que dividir la compresión (opcional).  
-    Si se omite, se creará un único archivo ZIP.
+- `-s` : Tamaño en MB máximo por fragmento
