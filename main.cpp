@@ -4,11 +4,12 @@
 using namespace std;
 
 void showHelp(int maxSizeMB = 50) {
-    cout << "Uso: compressor -d [carpeta] -o [archivo_zip] [-p número_de_partes]" << endl;
+    cout << "Uso: compressor -d [carpeta] -o [archivo_zip] [-s tamaño_MB] [-e contraseña]" << endl;
     cout << "  -d : Directorio a comprimir (default: ./test)" << endl;
     cout << "  -o : Archivo ZIP de salida (default: ./output/archivo_comprimido.zip)" << endl;
-    cout << "  -s : Tamaño máximo por fragmento (en MB)" << endl;
-    cout << "       Si se omite, se utiliza " << maxSizeMB <<" MB por defecto" << endl;
+    cout << "  -s : Tamaño máximo por fragmento (en MB, default: " << maxSizeMB << ")" << endl;
+    cout << "  -e : Contraseña para encriptado (opcional)" << endl;
+    cout << "  -h : Mostrar esta ayuda" << endl;
 }
 
 int main(int argc, char *argv[])
@@ -22,6 +23,7 @@ int main(int argc, char *argv[])
 
     string sourceDir = "./test";
     string outputZip = "./output/archivo_comprimido.zip";
+    string encryptPassword = "";
 
     for(int i = 0; i < argc; i++)
     {
@@ -46,6 +48,11 @@ int main(int argc, char *argv[])
                 return 1;
             }
         }
+        else if (string(argv[i]) == "-e" && i + 1 < argc)
+        {
+            encryptPassword = argv[i + 1];
+            cout << "Modo encriptado habilitado" << endl;
+        }
         else if (string(argv[i]) == "-h" || string(argv[i]) == "--help")
         {
             showHelp();
@@ -55,10 +62,12 @@ int main(int argc, char *argv[])
 
     bool success;
     
-    if (maxSizeMB > 0) {
-        //cout << "Comprimiendo en " << numParts << " partes..." << endl;
+    if (!encryptPassword.empty()) {
+        cout << "Comprimiendo con encriptado..." << endl;
+        success = compressFolderToSplitZipEncrypted(sourceDir, outputZip, maxSizeMB, encryptPassword);
+    } else {
         success = compressFolderToSplitZip(sourceDir, outputZip, maxSizeMB);
-    } 
+    }
     if (success)
     {
         cout << "¡Compresión exitosa!" << endl;

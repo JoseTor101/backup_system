@@ -16,7 +16,9 @@ using namespace std;
  * @param ignorePatterns Conjunto de patrones para ignorar
  * @return true si el archivo debe ser ignorado, false en caso contrario
  */
-bool shouldIgnoreFile(const string &relativePath, const set<string> &ignorePatterns);
+bool shouldIgnoreFile(const std::string &relativePath, const std::set<std::string> &ignorePatterns);
+std::set<std::string> readIgnorePatterns(const std::string &folderPath);
+std::vector<std::filesystem::path> collectFiles(const std::string &folderPath, const std::set<std::string> &ignorePatterns);
 
 /**
  * Función mejorada para añadir un buffer de memoria a un ZIP con opción de copiar
@@ -149,5 +151,7 @@ bool processNormalFiles(vector<filesystem::path> &allFiles, size_t &fileIndex, c
  */
 bool compressFolderToSplitZip(const string &folderPath, const string &zipOutputPath, int maxSizeMB);
 
+bool compressFolderToSplitZipEncrypted(const std::string &folderPath, const std::string &zipOutputPath, 
+                                       int maxSizeMB, const std::string &password = "");
 
 #endif // COMPRESS_H
