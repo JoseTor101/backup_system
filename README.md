@@ -27,7 +27,7 @@ make
 ```
 
 ```sh
-g++ decompress.cpp -o decompressor -std=c++17 -lzip -lssl -lcrypto
+g++ decompress.cpp -o descompresor -std=c++17 -lzip -lssl -lcrypto
 ```
 --
 ## Funcionalidades
