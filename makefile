@@ -1,7 +1,7 @@
 # Compiler and flags
 CXX = g++
 CXXFLAGS = -std=c++17
-LDFLAGS = -lzip -lssl -lcrypto
+LDFLAGS = -fopenmp -lzip -lssl -lcrypto
 
 # Target executables
 TARGETS = main descompresor

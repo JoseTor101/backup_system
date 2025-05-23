@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include <zip.h>
+#include <omp.h>
+#include <mutex>
 
 using namespace std;
 
@@ -96,13 +98,26 @@ vector<filesystem::path> collectFiles(const string &folderPath,
                                       const set<string> &ignorePatterns) {
   vector<filesystem::path> allFiles;
 
-  // Recorrer recursivamente el directorio
-  for (const auto &entry :
-       filesystem::recursive_directory_iterator(folderPath)) {
+  // Recorrer el filesystem (aún secuencial) y guardar todos los archivos regulares
+  vector<filesystem::directory_entry> entries;
+  for (const auto &entry : filesystem::recursive_directory_iterator(folderPath)) {
     if (entry.is_regular_file()) {
-      // Obtener la ruta relativa al directorio base
-      string relativePath =
-          filesystem::relative(entry.path(), folderPath).string();
+      entries.push_back(entry);
+    }
+  }
+
+  // Filtrar en paralelo los archivos a ignorar
+  vector<filesystem::path> tempFiles;
+  std::mutex mtx;
+
+  #pragma omp parallel
+  {
+    vector<filesystem::path> localFiles;
+
+    #pragma omp for nowait    // No necesita esperar que todos los hilos terminen el bucle.
+    for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+      const auto &entry = entries[i];
+      string relativePath = filesystem::relative(entry.path(), folderPath).string();
 
       // Comprobar si el archivo debe ser ignorado
       bool shouldIgnore = false;
@@ -116,9 +131,13 @@ vector<filesystem::path> collectFiles(const string &folderPath,
       }
 
       if (!shouldIgnore) {
-        allFiles.push_back(entry.path());
+        localFiles.push_back(entry.path());
       }
     }
+
+    // Fusionar resultados en una sola lista con exclusión mutua
+    #pragma omp critical      //Protege una sección del código para que solo un hilo a la vez pueda ejecutarla.
+    allFiles.insert(allFiles.end(), localFiles.begin(), localFiles.end());
   }
 
   return allFiles;
@@ -353,9 +372,8 @@ bool processLargeFile(const filesystem::path &filePath,
   cout << "  Archivo grande detectado: " << relativePath << " ("
        << (fileSize / 1024 / 1024) << "MB)" << endl;
 
-  // Calcular fragmentos necesarios
-  int fragmentsNeeded =
-      static_cast<int>((fileSize + maxSizeBytes - 1) / maxSizeBytes);
+  int fragmentsNeeded = static_cast<int>((fileSize + maxSizeBytes - 1) / maxSizeBytes);
+  int startingPart = part + 1;
 
   // Actualizar totalParts si es necesario
   if (fragmentsNeeded > totalParts) {
@@ -365,117 +383,102 @@ bool processLargeFile(const filesystem::path &filePath,
   cout << "  Dividiendo en " << fragmentsNeeded << " archivos ZIP"
        << (isEncrypted ? " encriptados" : "") << "..." << endl;
 
-  // Procesar cada fragmento
-  bool fragmentSuccess = true;
-  ifstream largeFile(filePath.string(), ios::binary);
-  if (!largeFile) {
-    cerr << "  Error al abrir archivo grande: " << filePath << endl;
-    return false;
-  }
+  #pragma omp parallel for schedule(dynamic)
+  for (int fragNum = 0; fragNum < fragmentsNeeded; fragNum++) {
+    streamsize offset = fragNum * maxSizeBytes;
+    streamsize bytesToRead = min(maxSizeBytes, static_cast<size_t>(fileSize - offset));
 
-  char *buffer = new char[maxSizeBytes];
-
-  for (int fragNum = 0; fragNum < fragmentsNeeded && fragmentSuccess;
-       fragNum++) {
-    part++;
-    string partFileName = baseName + "_part" + to_string(part) + "_of_" +
-                          to_string(totalParts) + extension;
-    filesystem::path partPath = outputDir / partFileName;
-
-    cout << "  Creando parte " << part << " para fragmento " << (fragNum + 1)
-         << " de " << fragmentsNeeded << endl;
-
-    // Abrir archivo ZIP
-    int zip_error = 0;
-    zip_t *archive = zip_open(partPath.string().c_str(),
-                              ZIP_CREATE | ZIP_TRUNCATE, &zip_error);
-    if (!archive) {
-      char errstr[128];
-      zip_error_to_str(errstr, sizeof(errstr), zip_error, errno);
-      cerr << "No se pudo crear el archivo ZIP: " << partPath << " - " << errstr
-           << endl;
+    ifstream largeFile(filePath, ios::binary);
+    if (!largeFile) {
+      #pragma omp critical
+      cerr << "  Error al abrir archivo grande en el hilo " << fragNum << endl;
+      #pragma omp atomic write
       overallSuccess = false;
-      fragmentSuccess = false;
       continue;
     }
 
-    // Leer un fragmento del archivo
-    streamsize bytesToRead = min(
-        maxSizeBytes, static_cast<size_t>(fileSize - (fragNum * maxSizeBytes)));
-
-    largeFile.seekg(fragNum * maxSizeBytes);
-    if (!largeFile.read(buffer, bytesToRead)) {
-      cerr << "Error al leer fragmento del archivo: " << filePath << endl;
+    vector<char> buffer(bytesToRead);
+    largeFile.seekg(offset);
+    if (!largeFile.read(buffer.data(), bytesToRead)) {
+      #pragma omp critical
+      cerr << "  Error al leer fragmento " << fragNum << " del archivo." << endl;
+      #pragma omp atomic write
       overallSuccess = false;
-      fragmentSuccess = false;
-      zip_close(archive);
-      break;
+      continue;
     }
 
-    // Crear nombre para este fragmento
-    string fragmentName = relativePath + ".fragment" + to_string(fragNum + 1) +
-                          "_of_" + to_string(fragmentsNeeded);
+    int localPart = startingPart + fragNum;
+    string partFileName = baseName + "_part" + to_string(localPart) + "_of_" + to_string(totalParts) + extension;
+    filesystem::path partPath = outputDir / partFileName;
 
-    // Añadir fragmento al ZIP usando la función adecuada
+    int zip_error = 0;
+    zip_t *archive = zip_open(partPath.string().c_str(), ZIP_CREATE | ZIP_TRUNCATE, &zip_error);
+    if (!archive) {
+      char errstr[128];
+      zip_error_to_str(errstr, sizeof(errstr), zip_error, errno);
+      #pragma omp critical
+      cerr << "No se pudo crear el archivo ZIP: " << partPath << " - " << errstr << endl;
+      #pragma omp atomic write
+      overallSuccess = false;
+      continue;
+    }
+
+    string fragmentName = relativePath + ".fragment" + to_string(fragNum + 1) + "_of_" + to_string(fragmentsNeeded);
     bool success = false;
+    bool fragmentSuccess = true;
+
     if (isEncrypted) {
-      success = addEncryptedBufferToZip(archive, buffer, bytesToRead,
-                                        fragmentName, password, true, true,
-                                        &overallSuccess, &fragmentSuccess);
+      success = addEncryptedBufferToZip(archive, buffer.data(), bytesToRead, fragmentName, password, true, true, &overallSuccess, &fragmentSuccess);
     } else {
-      success = addBufferToZip(archive, buffer, bytesToRead, fragmentName, true,
-                               true, &overallSuccess, &fragmentSuccess);
+      success = addBufferToZip(archive, buffer.data(), bytesToRead, fragmentName, true, true, &overallSuccess, &fragmentSuccess);
     }
 
     if (!success) {
       zip_close(archive);
-      break;
+      continue;
     }
 
-    // Añadir archivo .info al ZIP (sin encriptar)
     ostringstream fragInfoContent;
-    fragInfoContent << totalParts << "\n";
-    fragInfoContent << part << "\n";
-
-    // Añadir info de encriptación si corresponde
+    fragInfoContent << totalParts << "\n" << localPart << "\n";
     if (isEncrypted) {
-      fragInfoContent << "encrypted: " << crypto.generatePasswordHash(password)
-                      << "\n";
+      fragInfoContent << "encrypted: " << crypto.generatePasswordHash(password) << "\n";
     }
-
     fragInfoContent << fragmentName << " | " << filePath.string() << "\n";
 
-    if (!addBufferToZip(archive, fragInfoContent.str().data(),
-                        fragInfoContent.str().size(),
-                        "part_" + to_string(part) + ".info", true, true)) {
+    if (!addBufferToZip(archive, fragInfoContent.str().data(), fragInfoContent.str().size(), "part_" + to_string(localPart) + ".info", true, true)) {
+      #pragma omp critical
       cerr << "  Error al agregar archivo de información" << endl;
+      #pragma omp atomic write
       overallSuccess = false;
       fragmentSuccess = false;
     }
 
-    cout << "    Fragmento " << (fragNum + 1) << " de " << fragmentsNeeded
-         << " (" << (bytesToRead / 1024) << "KB)" << endl;
-
-    totalFragments++;
-
-    // Cerrar el archivo ZIP
     if (zip_close(archive) < 0) {
+      #pragma omp critical
       cerr << "Error al cerrar el archivo ZIP: " << partPath << endl;
+      #pragma omp atomic write
       overallSuccess = false;
-      fragmentSuccess = false;
+    }
+
+    #pragma omp critical
+    {
+      totalFragments++;
+      cout << "    Fragmento " << (fragNum + 1) << " de " << fragmentsNeeded << " (" << (bytesToRead / 1024) << "KB)" << endl;
     }
   }
 
-  delete[] buffer;
+  #pragma omp atomic update
+  part += fragmentsNeeded;
 
-  if (!fragmentSuccess) {
+  if (!overallSuccess) {
     cerr << "Error al fragmentar el archivo " << filePath << endl;
   } else {
     cout << "  Archivo fragmentado correctamente: " << relativePath << endl;
   }
 
-  return fragmentSuccess;
+  return overallSuccess;
 }
+
 
 bool processNormalFiles(vector<filesystem::path> &allFiles, size_t &fileIndex,
                         const string &folderPath, size_t maxSizeBytes,
