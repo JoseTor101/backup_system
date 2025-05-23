@@ -426,6 +426,121 @@ bool processLargeFile(const filesystem::path &filePath, const string &relativePa
     return fragmentSuccess;
 }
 
+bool processLargeFileEncrypted(const filesystem::path &filePath, const string &relativePath, 
+                              const string &folderPath, size_t maxSizeBytes, const string &baseName, 
+                              const string &extension, const filesystem::path &outputDir, 
+                              int &part, int &totalParts, int &totalFragments, 
+                              bool &overallSuccess, const string &password) {
+    uintmax_t fileSize = filesystem::file_size(filePath);
+    cout << "  Archivo grande detectado: " << relativePath 
+          << " (" << (fileSize / 1024 / 1024) << "MB)" << endl;
+    
+    // Calcular fragmentos necesarios
+    int fragmentsNeeded = static_cast<int>((fileSize + maxSizeBytes - 1) / maxSizeBytes);
+    
+    // Actualizar totalParts si es necesario
+    if (fragmentsNeeded > totalParts) {
+        totalParts = fragmentsNeeded;
+    }
+    
+    cout << "  Dividiendo en " << fragmentsNeeded << " archivos ZIP" 
+         << (password.empty() ? "" : " encriptados") << "..." << endl;
+    
+    // Procesar cada fragmento
+    bool fragmentSuccess = true;
+    ifstream largeFile(filePath.string(), ios::binary);
+    if (!largeFile) {
+        cerr << "  Error al abrir archivo grande: " << filePath << endl;
+        return false;
+    }
+    
+    char* buffer = new char[maxSizeBytes];
+    
+    for (int fragNum = 0; fragNum < fragmentsNeeded && fragmentSuccess; fragNum++) {
+        part++;
+        string partFileName = baseName + "_part" + to_string(part) +
+                             "_of_" + to_string(totalParts) + extension;
+        filesystem::path partPath = outputDir / partFileName;
+        
+        cout << "  Creando parte " << part << " para fragmento " 
+              << (fragNum + 1) << " de " << fragmentsNeeded 
+              << (password.empty() ? "" : " (encriptada)") << endl;
+        
+        // Abrir archivo ZIP
+        int zip_error = 0;
+        zip_t *archive = zip_open(partPath.string().c_str(), ZIP_CREATE | ZIP_TRUNCATE, &zip_error);
+        if (!archive) {
+            char errstr[128];
+            zip_error_to_str(errstr, sizeof(errstr), zip_error, errno);
+            cerr << "No se pudo crear el archivo ZIP: " << partPath << " - " << errstr << endl;
+            overallSuccess = false;
+            fragmentSuccess = false;
+            continue;
+        }
+        
+        // Leer un fragmento del archivo
+        streamsize bytesToRead = min(maxSizeBytes, 
+                           static_cast<size_t>(fileSize - (fragNum * maxSizeBytes)));
+        
+        largeFile.seekg(fragNum * maxSizeBytes);
+        if (!largeFile.read(buffer, bytesToRead)) {
+            cerr << "Error al leer fragmento del archivo: " << filePath << endl;
+            overallSuccess = false;
+            fragmentSuccess = false;
+            zip_close(archive);
+            break;
+        }
+        
+        // Crear nombre para este fragmento
+        string fragmentName = relativePath + ".fragment" + to_string(fragNum + 1) + 
+                              "_of_" + to_string(fragmentsNeeded);
+        
+        // Añadir fragmento al ZIP con encriptado
+        if (!addEncryptedBufferToZip(archive, buffer, bytesToRead, fragmentName, password, 
+                                   true, true, &overallSuccess, &fragmentSuccess)) {
+            zip_close(archive);
+            break;
+        }
+        else {
+            totalFragments++;
+        }
+        
+        // Añadir archivo .info con información del fragmento
+        ostringstream fragInfoContent;
+        fragInfoContent << totalParts << "\n";
+        fragInfoContent << part << "\n";
+        if (!password.empty()) {
+            fragInfoContent << "encrypted: " << crypto.generatePasswordHash(password) << "\n";
+        }
+        fragInfoContent << fragmentName << " | " << filePath.string() << "\n";
+        
+        if (!addEncryptedBufferToZip(archive, fragInfoContent.str().data(), fragInfoContent.str().size(), 
+                                   "part_" + to_string(part) + ".info", password, true, true)) {
+            cerr << "  Error al agregar archivo de información" << endl;
+            overallSuccess = false;
+            fragmentSuccess = false;
+        } else {
+            cout << "  Agregado: part_" << part << ".info (Información de fragmento" 
+                 << (password.empty() ? "" : " encriptada") << ")" << endl;
+        }
+        
+        cout << "  Fragmento " << (fragNum + 1) << " de " << fragmentsNeeded 
+              << " (" << (bytesToRead / 1024) << "KB) añadido" 
+              << (password.empty() ? "" : " y encriptado") 
+              << " a " << partPath.filename() << endl;
+        
+        // Cerrar el archivo ZIP
+        if (zip_close(archive) < 0) {
+            cerr << "Error al cerrar el archivo ZIP: " << partPath << endl;
+            overallSuccess = false;
+            fragmentSuccess = false;
+        }
+    }
+    
+    delete[] buffer;
+    return fragmentSuccess;
+}
+
 
 
 // Procesa archivos normales agregándolos a un único archivo ZIP
@@ -670,7 +785,6 @@ bool addEncryptedFileToZip(zip_t *archive, const string &filePath, const string 
     return result;
 }
 
-// Función principal con encriptado
 bool compressFolderToSplitZipEncrypted(const string &folderPath, const string &zipOutputPath, 
                                      int maxSizeMB, const string &password) {
     if (maxSizeMB <= 0) {
@@ -708,17 +822,24 @@ bool compressFolderToSplitZipEncrypted(const string &folderPath, const string &z
     int part = 0;
     size_t fileIndex = 0;
     int totalParts = calculateTotalParts(allFiles, maxSizeBytes, maxSizeMB);
+    int totalFragments = 0;
     
-    // Procesar archivos (usando funciones auxiliares modificadas)
+    // Procesar todos los archivos
     while (fileIndex < allFiles.size()) {
+        // Verificar el próximo archivo
         uintmax_t nextFileSize = filesystem::file_size(allFiles[fileIndex]);
+        string relativePath = filesystem::relative(allFiles[fileIndex], folderPath).string();
         
+        // Si es un archivo grande
         if (nextFileSize > maxSizeBytes) {
-            // Para archivos grandes, usaríamos processLargeFileEncrypted (no implementada aquí)
+            bool result = processLargeFileEncrypted(allFiles[fileIndex], relativePath, folderPath,
+                                                  maxSizeBytes, baseName, extension, outputDir,
+                                                  part, totalParts, totalFragments, overallSuccess, password);
             fileIndex++;
             continue;
         }
         
+        // Si es un archivo normal
         part++;
         string partFileName = baseName + "_part" + to_string(part) + "_of_" + to_string(totalParts) + extension;
         filesystem::path partPath = outputDir / partFileName;
@@ -777,7 +898,11 @@ bool compressFolderToSplitZipEncrypted(const string &folderPath, const string &z
     }
     
     cout << "\nCompresión" << (password.empty() ? "" : " encriptada") 
-         << " completada en " << part << " partes." << endl;
+         << " completada en " << part << " partes";
+    if (totalFragments > 0) {
+        cout << " (incluyendo " << totalFragments << " fragmentos de archivos grandes)";
+    }
+    cout << "." << endl;
     
     return overallSuccess;
 }
