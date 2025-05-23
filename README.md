@@ -25,6 +25,10 @@ Compilación:
 ```sh
 make
 ```
+
+```sh
+g++ decompress.cpp -o decompressor -std=c++17 -lzip -lssl -lcrypto
+```
 --
 ## Funcionalidades
 
@@ -50,10 +54,15 @@ carpeta/archivo2.jpg | /ruta/completa/al/carpeta/archivo2.jpg
 
 **Uso:**  
 ```sh
-./main -d [carpeta] -o [archivo_zip] -p [número_de_partes]
+./main -d [carpeta] -o [archivo_zip] -s [tamaño] -e [contraseña_encriptacion]
+```
+```sh
+./decompressor -i [carpeta_del_zip] -o [carpeta_output] -p [contraseña_encriptación]
 ```
 
 **Opciones:**
 - `-d` : Directorio a comprimir (default: `./test`)
 - `-o` : Archivo ZIP de salida (default: `./output/archivo_comprimido.zip`)
 - `-s` : Tamaño en MB máximo por fragmento
+- `-e` : Contraseña para la encriptación
+- `-p` : Contraseña para la decriptación

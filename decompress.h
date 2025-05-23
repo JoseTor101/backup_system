@@ -8,6 +8,7 @@
 #include <sstream>
 #include <vector>
 #include <map>
+#include <tuple>
 #include <zip.h>
 #include <cstring>
 #include <regex>
@@ -19,10 +20,11 @@
  * @brief Estructura que almacena la información de una parte del archivo ZIP fragmentado
  */
 struct PartInfo {
-    int totalParts;                                           // Número total de partes
-    int partNumber;                                           // Número de esta parte
-    std::map<std::string, std::string> filePathMapping;       // zipPath -> originalPath
-    std::vector<std::tuple<std::string, std::string, int, int>> fragments; // <zipPath, originalPath, fragNum, totalFrags>
+    int totalParts = 0;
+    int partNumber = 0;
+    std::string encryptionHash = ""; // Hash for encrypted files
+    std::map<std::string, std::string> filePathMapping; // zipPath -> originalPath
+    std::vector<std::tuple<std::string, std::string, int, int>> fragments; // zipPath, originalPath, fragNum, totalFrags
 };
 
 /**
@@ -42,12 +44,31 @@ PartInfo parseInfoFile(const std::string& infoContent);
 bool extractFileFromZip(zip_t* archive, const std::string& zipPath, const std::string& outputPath);
 
 /**
+ * @brief Extrae un archivo específico de un ZIP a la ruta destino con desencriptación
+ * @param archive Puntero al archivo ZIP abierto
+ * @param zipPath Ruta del archivo dentro del ZIP
+ * @param outputPath Ruta donde se extraerá el archivo
+ * @param password Contraseña para desencriptar el archivo (opcional)
+ * @return true si la extracción fue exitosa, false en caso contrario
+ */
+bool extractFileFromZipWithDecryption(zip_t* archive, const std::string& zipPath, const std::string& outputPath, const std::string& password = "");
+
+/**
  * @brief Lee el contenido de un archivo de texto desde un ZIP
  * @param archive Puntero al archivo ZIP abierto
  * @param zipPath Ruta del archivo dentro del ZIP
  * @return Contenido del archivo como string, o string vacío en caso de error
  */
 std::string readTextFileFromZip(zip_t* archive, const std::string& zipPath);
+
+/**
+ * @brief Lee el contenido de un archivo de texto desde un ZIP con desencriptación
+ * @param archive Puntero al archivo ZIP abierto
+ * @param zipPath Ruta del archivo dentro del ZIP
+ * @param password Contraseña para desencriptar el archivo (opcional)
+ * @return Contenido del archivo como string, o string vacío en caso de error
+ */
+std::string readTextFileFromZipWithDecryption(zip_t* archive, const std::string& zipPath, const std::string& password = "");
 
 /**
  * @brief Reconstruye un archivo fragmentado a partir de sus partes
@@ -71,5 +92,14 @@ bool reconstructFragmentedFile(const std::string &outputPath,
  * @return true si la descompresión fue exitosa, false en caso contrario
  */
 bool decompressParts(const std::string &folderPath, const std::string &outputPath);
+
+/**
+ * @brief Descomprime todos los archivos ZIP en el directorio especificado con desencriptación
+ * @param folderPath Directorio donde se encuentran los archivos ZIP
+ * @param outputPath Directorio donde se extraerán los archivos
+ * @param password Contraseña para desencriptar los archivos (opcional)
+ * @return true si la descompresión fue exitosa, false en caso contrario
+ */
+bool decompressPartsWithPassword(const std::string &folderPath, const std::string &outputPath, const std::string &password = "");
 
 #endif // DECOMPRESS_H

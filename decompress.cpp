@@ -11,8 +11,11 @@
 #include <regex>
 #include <algorithm>
 #include <set>
+#include "crypto.h"
 
 using namespace std;
+
+static SimpleCrypto crypto;
 
 // Declaraciones anticipadas
 bool reconstructFragmentedFile(const string &outputPath, 
@@ -20,6 +23,7 @@ bool reconstructFragmentedFile(const string &outputPath,
                              const string &fragmentBaseName,
                              int totalFragments,
                              const string &originalPath);
+
 
 // Parsea un archivo .info y extrae la información
 PartInfo parseInfoFile(const string& infoContent) {
@@ -44,6 +48,40 @@ PartInfo parseInfoFile(const string& infoContent) {
         } catch (...) {
             cerr << "Error al parsear el número de parte: " << line << endl;
             info.partNumber = 0; // Error en el formato
+        }
+    }
+    
+    // Check for encryption info
+    if (getline(stream, line)) {
+        if (line.find("encrypted:") == 0) {
+            info.encryptionHash = line.substr(11); // Remove "encrypted: " prefix
+            cout << "Archivo encriptado detectado (hash: " << info.encryptionHash << ")" << endl;
+        } else {
+            // Not encryption line, process as file mapping
+            size_t pos = line.find(" | ");
+            if (pos != string::npos) {
+                string zipPath = line.substr(0, pos);
+                string remaining = line.substr(pos + 3);
+                
+                // Verificar si es un fragmento
+                if (zipPath.find(".fragment") != string::npos) {
+                    regex fragmentRegex("(.+)\\.fragment(\\d+)_of_(\\d+)");
+                    smatch match;
+                    
+                    if (regex_match(zipPath, match, fragmentRegex) && match.size() == 4) {
+                        string baseName = match[1];
+                        int fragNum = stoi(match[2]);
+                        int totalFrags = stoi(match[3]);
+                        
+                        info.fragments.push_back(make_tuple(zipPath, remaining, fragNum, totalFrags));
+                        info.filePathMapping[zipPath] = remaining;
+                    } else {
+                        info.filePathMapping[zipPath] = remaining;
+                    }
+                } else {
+                    info.filePathMapping[zipPath] = remaining;
+                }
+            }
         }
     }
     
@@ -83,8 +121,8 @@ PartInfo parseInfoFile(const string& infoContent) {
     return info;
 }
 
-// Extrae un archivo específico de un ZIP a la ruta destino
-bool extractFileFromZip(zip_t* archive, const string& zipPath, const string& outputPath) {
+// Modified function to extract file with decryption support
+bool extractFileFromZipWithDecryption(zip_t* archive, const string& zipPath, const string& outputPath, const string& password) {
     // Encontrar el archivo en el ZIP
     zip_int64_t index = zip_name_locate(archive, zipPath.c_str(), 0);
     if (index < 0) {
@@ -107,36 +145,48 @@ bool extractFileFromZip(zip_t* archive, const string& zipPath, const string& out
         return false;
     }
     
+    // Leer todo el contenido en memoria
+    vector<unsigned char> buffer(stat.size);
+    zip_int64_t bytesRead = zip_fread(zf, buffer.data(), stat.size);
+    zip_fclose(zf);
+    
+    if (bytesRead < 0 || bytesRead != static_cast<zip_int64_t>(stat.size)) {
+        cerr << "Error al leer el archivo completo " << zipPath << endl;
+        return false;
+    }
+    
+    // Decrypt if password is provided
+    if (!password.empty()) {
+        auto decrypted = crypto.decrypt(buffer.data(), buffer.size(), password);
+        buffer = decrypted;
+    }
+    
     // Crear directorio destino si no existe
     filesystem::path outputFile(outputPath);
     filesystem::create_directories(outputFile.parent_path());
     
-    // Abrir archivo destino para escritura
+    // Escribir archivo destino
     ofstream outFile(outputPath, ios::binary);
     if (!outFile) {
         cerr << "No se puede crear el archivo destino " << outputPath << endl;
-        zip_fclose(zf);
         return false;
     }
     
-    // Leer el contenido y escribirlo en el archivo destino
-    const int bufferSize = 8192;
-    char buffer[bufferSize];
-    zip_int64_t bytesRead;
-    while ((bytesRead = zip_fread(zf, buffer, bufferSize)) > 0) {
-        outFile.write(buffer, bytesRead);
-    }
-    
-    // Cerrar archivos
+    outFile.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
     outFile.close();
-    zip_fclose(zf);
     
-    cout << "    Extraído: " << outputPath << " (" << stat.size << " bytes)" << endl;
+    cout << "    Extraído" << (password.empty() ? "" : " (desencriptado)") << ": " 
+         << outputPath << " (" << buffer.size() << " bytes)" << endl;
     return true;
 }
 
-// Leer el contenido de un archivo de texto desde un ZIP
-string readTextFileFromZip(zip_t* archive, const string& zipPath) {
+// Extrae un archivo específico de un ZIP a la ruta destino
+bool extractFileFromZip(zip_t* archive, const string& zipPath, const string& outputPath) {
+    return extractFileFromZipWithDecryption(archive, zipPath, outputPath, "");
+}
+
+// Modified function to read text file with decryption support
+string readTextFileFromZipWithDecryption(zip_t* archive, const string& zipPath, const string& password) {
     zip_int64_t index = zip_name_locate(archive, zipPath.c_str(), 0);
     if (index < 0) {
         cerr << "No se encuentra el archivo " << zipPath << " en el ZIP" << endl;
@@ -156,7 +206,7 @@ string readTextFileFromZip(zip_t* archive, const string& zipPath) {
         return "";
     }
     
-    vector<char> buffer(stat.size + 1, 0);
+    vector<unsigned char> buffer(stat.size);
     zip_int64_t bytesRead = zip_fread(zf, buffer.data(), stat.size);
     zip_fclose(zf);
     
@@ -165,12 +215,22 @@ string readTextFileFromZip(zip_t* archive, const string& zipPath) {
         return "";
     }
     
-    return string(buffer.data(), bytesRead);
+    // Decrypt if password is provided
+    if (!password.empty()) {
+        auto decrypted = crypto.decrypt(buffer.data(), bytesRead, password);
+        return string(decrypted.begin(), decrypted.end());
+    }
+    
+    return string(buffer.begin(), buffer.begin() + bytesRead);
 }
 
+// Leer el contenido de un archivo de texto desde un ZIP
+string readTextFileFromZip(zip_t* archive, const string& zipPath) {
+    return readTextFileFromZipWithDecryption(archive, zipPath, "");
+}
 
-// Función principal para descomprimir partes
-bool decompressParts(const string &folderPath, const string &outputPath) {
+// Modified main decompression function with password support
+bool decompressPartsWithPassword(const string &folderPath, const string &outputPath, const string &password) {
     // Buscar todos los archivos ZIP en el directorio especificado
     vector<filesystem::path> zipFiles;
     for (const auto& entry : filesystem::directory_iterator(folderPath)) {
@@ -185,6 +245,10 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
     }
     
     cout << "Se encontraron " << zipFiles.size() << " archivos ZIP para descomprimir" << endl;
+    if (!password.empty()) {
+        cout << "Modo desencriptado activado" << endl;
+        cout << "Hash de verificación: " << crypto.generatePasswordHash(password) << endl;
+    }
     
     // Asegurar que el directorio de salida exista
     filesystem::create_directories(outputPath);
@@ -194,6 +258,9 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
     map<string, vector<tuple<string, string, int, int>>> allFragments;
     
     // Primera pasada: recopilar información de todos los fragmentos
+    bool encryptionDetected = false;
+    string detectedHash = "";
+    
     for (const auto& zipFile : zipFiles) {
         int err = 0;
         zip_t* archive = zip_open(zipFile.string().c_str(), 0, &err);
@@ -223,16 +290,55 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
             continue;
         }
         
-        // Leer y parsear el archivo .info
-        string infoContent = readTextFileFromZip(archive, infoFileName);
+        // Leer y parsear el archivo .info (try both encrypted and unencrypted)
+        string infoContent = readTextFileFromZipWithDecryption(archive, infoFileName, password);
+        if (infoContent.empty() && !password.empty()) {
+            // Try without decryption in case .info is not encrypted
+            infoContent = readTextFileFromZip(archive, infoFileName);
+        }
+        
         if (infoContent.empty()) {
             cerr << "No se pudo leer el archivo .info en " << zipFile << endl;
             continue;
         }
         
         PartInfo info = parseInfoFile(infoContent);
+        
+        // Check for encryption and verify password if provided
+        if (!info.encryptionHash.empty()) {
+            encryptionDetected = true;
+            if (detectedHash.empty()) {
+                detectedHash = info.encryptionHash;
+            }
+            
+            if (!password.empty()) {
+                string providedHash = crypto.generatePasswordHash(password);
+                if (providedHash != info.encryptionHash) {
+                    cerr << "¡Error! La contraseña proporcionada no coincide con la utilizada para encriptar." << endl;
+                    cerr << "Hash esperado: " << info.encryptionHash << endl;
+                    cerr << "Hash proporcionado: " << providedHash << endl;
+                    
+                    // Cerrar archivos abiertos
+                    for (auto& [path, arch] : allArchives) {
+                        zip_close(arch);
+                    }
+                    return false;
+                }
+            } else {
+                cerr << "¡Error! Los archivos están encriptados pero no se proporcionó contraseña." << endl;
+                cerr << "Use el parámetro -p para proporcionar la contraseña." << endl;
+                
+                // Cerrar archivos abiertos
+                for (auto& [path, arch] : allArchives) {
+                    zip_close(arch);
+                }
+                return false;
+            }
+        }
+        
         cout << "  Parte " << info.partNumber << " de " << info.totalParts 
-                  << " con " << info.filePathMapping.size() << " archivos" << endl;
+                  << " con " << info.filePathMapping.size() << " archivos" 
+                  << (info.encryptionHash.empty() ? "" : " (encriptada)") << endl;
         
         // Registrar todos los fragmentos encontrados
         for (const auto& [zipPath, originalPath, fragNum, totalFrags] : info.fragments) {
@@ -267,7 +373,11 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
         }
         
         // Leer y parsear el archivo .info
-        string infoContent = readTextFileFromZip(archive, infoFileName);
+        string infoContent = readTextFileFromZipWithDecryption(archive, infoFileName, password);
+        if (infoContent.empty() && !password.empty()) {
+            infoContent = readTextFileFromZip(archive, infoFileName);
+        }
+        
         if (infoContent.empty()) {
             cerr << "No se pudo leer el archivo .info en " << zipPath << endl;
             continue;
@@ -287,7 +397,7 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
             
             cout << "  Extrayendo " << zipPath << " a " << destPath << endl;
             
-            if (!extractFileFromZip(archive, zipPath, destPath.string())) {
+            if (!extractFileFromZipWithDecryption(archive, zipPath, destPath.string(), password)) {
                 cerr << "  Error al extraer " << zipPath << endl;
             }
         }
@@ -361,24 +471,35 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
                         break;
                     }
                     
-                    // Copiar contenido del fragmento al archivo de salida
-                    const int bufferSize = 8192;
-                    char buffer[bufferSize];
-                    zip_int64_t bytesRead;
+                    // Read entire fragment into memory
+                    vector<unsigned char> buffer(stat.size);
+                    zip_int64_t bytesRead = zip_fread(zf, buffer.data(), stat.size);
+                    zip_fclose(zf);
                     
-                    while ((bytesRead = zip_fread(zf, buffer, bufferSize)) > 0) {
-                        outFile.write(buffer, bytesRead);
-                        if (!outFile) {
-                            cerr << "Error al escribir fragmento al archivo de salida" << endl;
-                            reconstructionSuccess = false;
-                            break;
-                        }
+                    if (bytesRead < 0 || bytesRead != static_cast<zip_int64_t>(stat.size)) {
+                        cerr << "Error al leer fragmento completo: " << fragZipPath << endl;
+                        reconstructionSuccess = false;
+                        break;
                     }
                     
-                    zip_fclose(zf);
+                    // Decrypt fragment if password is provided
+                    if (!password.empty()) {
+                        auto decrypted = crypto.decrypt(buffer.data(), buffer.size(), password);
+                        buffer = decrypted;
+                    }
+                    
+                    // Write fragment to output file
+                    outFile.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+                    if (!outFile) {
+                        cerr << "Error al escribir fragmento al archivo de salida" << endl;
+                        reconstructionSuccess = false;
+                        break;
+                    }
+                    
                     fragFound = true;
-                    cout << "  Procesado fragmento " << fragNumber << " de " << totalFrags 
-                              << " (" << (stat.size / 1024) << "KB)" << endl;
+                    cout << "  Procesado fragmento" << (password.empty() ? "" : " (desencriptado)") 
+                         << " " << fragNumber << " de " << totalFrags 
+                         << " (" << (buffer.size() / 1024) << "KB)" << endl;
                     break;
                 }
             }
@@ -406,20 +527,49 @@ bool decompressParts(const string &folderPath, const string &outputPath) {
         zip_close(archive);
     }
     
-    cout << "Descompresión completada en " << outputPath << endl;
+    cout << "Descompresión" << (password.empty() ? "" : " y desencriptado") 
+         << " completada en " << outputPath << endl;
     return true;
+}
+
+// Función principal para descomprimir partes
+bool decompressParts(const string &folderPath, const string &outputPath) {
+    return decompressPartsWithPassword(folderPath, outputPath, "");
 }
 
 int main(int argc, char* argv[]) {
     string inputFolder = "./output";
     string outputFolder = "./extracted";
+    string password = "";
     
-    if (argc > 1) inputFolder = argv[1];
-    if (argc > 2) outputFolder = argv[2];
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (string(argv[i]) == "-i" && i + 1 < argc) {
+            inputFolder = argv[i + 1];
+            i++;
+        } else if (string(argv[i]) == "-o" && i + 1 < argc) {
+            outputFolder = argv[i + 1];
+            i++;
+        } else if (string(argv[i]) == "-p" && i + 1 < argc) {
+            password = argv[i + 1];
+            i++;
+        } else if (string(argv[i]) == "-h" || string(argv[i]) == "--help") {
+            cout << "Uso: decompressor [-i carpeta_entrada] [-o carpeta_salida] [-p contraseña]" << endl;
+            cout << "  -i : Directorio con archivos ZIP (default: ./output)" << endl;
+            cout << "  -o : Directorio de salida (default: ./extracted)" << endl;
+            cout << "  -p : Contraseña para desencriptar (opcional)" << endl;
+            cout << "  -h : Mostrar esta ayuda" << endl;
+            return 0;
+        } else if (i == 1) {
+            inputFolder = argv[i];
+        } else if (i == 2) {
+            outputFolder = argv[i];
+        }
+    }
     
     cout << "Descomprimiendo archivos de " << inputFolder << " a " << outputFolder << endl;
     
-    if (decompressParts(inputFolder, outputFolder)) {
+    if (decompressPartsWithPassword(inputFolder, outputFolder, password)) {
         cout << "Operación completada con éxito." << endl;
         return 0;
     } else {
