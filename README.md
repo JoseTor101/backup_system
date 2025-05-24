@@ -8,6 +8,9 @@
 | Juan Andrés Montoya       | jamontoya2@eafit.edu.co     |
 | Valeria Corrales          | vcorrales1@eafit.edu.co     |
 
+## Sustentación
+[Video](https://youtu.be/w5VfpVKFcDE)
+
 ## Enunciado
 
 Desarrollar un sistema de respaldo seguro que permita a los usuarios seleccionar múltiples carpetas de un disco duro, respaldar todos los archivos de dichas carpetas (incluyendo subcarpetas), comprimirlos en un único archivo de backup utilizando algoritmos de compresión clásicos (ZIP, GZIP o BZIP2) y, opcionalmente, encriptarlo. El archivo de backup generado podrá almacenarse en un disco duro externo, en un servicio de almacenamiento en la nube o dividirse en fragmentos para guardarse en dispositivos USB. El sistema debe implementar técnicas de paralelismo utilizando Dask (si se desarrolla en Python) u OpenMP (si se desarrolla en C++), para optimizar el rendimiento en la compresión, encriptación (si aplica) y transferencia de datos. Se permite el uso de bibliotecas externas para compresión, encriptación y otras funcionalidades.
