@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -322,24 +323,31 @@ bool decompressPartsWithPassword(const string &folderPath,
   // Mantener una lista de todos los archivos ZIP abiertos para buscar
   // fragmentos
   vector<pair<string, zip_t *>> allArchives;
+  mutex archivesMutex; // Para proteger allArchives
   map<string, vector<tuple<string, string, int, int>>> allFragments;
+  mutex fragmentsMutex; // Para proteger allFragments
 
   // Primera pasada: recopilar información de todos los fragmentos
   bool encryptionDetected = false;
   string detectedHash = "";
 
-  for (const auto &zipFile : zipFiles) {
+  // Modificar el bucle para procesar en paralelo
+#pragma omp parallel for
+  for (size_t i = 0; i < zipFiles.size(); i++) {
+    const auto &zipFile = zipFiles[i];
     int err = 0;
     zip_t *archive = zip_open(zipFile.string().c_str(), 0, &err);
     if (!archive) {
       char errStr[128];
       zip_error_to_str(errStr, sizeof(errStr), err, errno);
-      cerr << "Error al abrir ZIP " << zipFile << ": " << errStr << endl;
+#pragma omp critical
+      { cerr << "Error al abrir ZIP " << zipFile << ": " << errStr << endl; }
       continue;
     }
 
-    // Añadir a la lista de archivos
-    allArchives.push_back({zipFile.string(), archive});
+    // Añadir a la lista de archivos con protección de mutex
+#pragma omp critical(archives)
+    { allArchives.push_back({zipFile.string(), archive}); }
 
     // Buscar el archivo .info dentro del ZIP
     string infoFileName;
@@ -444,16 +452,19 @@ bool decompressPartsWithPassword(const string &folderPath,
          << (info.encryptionHash.empty() ? "" : " (encriptada)") << endl;
 
     // Registrar todos los fragmentos encontrados
-    for (const auto &[zipPath, originalPath, fragNum, totalFrags] :
-         info.fragments) {
-      string baseName = zipPath.substr(0, zipPath.find(".fragment"));
+#pragma omp critical(fragments)
+    {
+      for (const auto &[zipPath, originalPath, fragNum, totalFrags] :
+           info.fragments) {
+        string baseName = zipPath.substr(0, zipPath.find(".fragment"));
 
-      if (allFragments.find(baseName) == allFragments.end()) {
-        allFragments[baseName] = vector<tuple<string, string, int, int>>();
+        if (allFragments.find(baseName) == allFragments.end()) {
+          allFragments[baseName] = vector<tuple<string, string, int, int>>();
+        }
+
+        allFragments[baseName].push_back(
+            make_tuple(zipPath, originalPath, fragNum, totalFrags));
       }
-
-      allFragments[baseName].push_back(
-          make_tuple(zipPath, originalPath, fragNum, totalFrags));
     }
   }
 
