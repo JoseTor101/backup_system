@@ -18,6 +18,7 @@ Desarrollar un sistema de respaldo seguro que permita a los usuarios seleccionar
 
 ```sh
 sudo apt-get install libminizip-dev zlib1g-dev
+sudo apt install libcurl4-openssl-dev
 ```
 
 Compilación:
@@ -28,6 +29,10 @@ make
 
 ```sh
 g++ decompress.cpp -o descompresor -std=c++17 -lzip -lssl -lcrypto
+```
+
+```sh
+g++ drive.cpp -o drive -lcurl
 ```
 --
 ## Funcionalidades
@@ -56,9 +61,16 @@ carpeta/archivo2.jpg | /ruta/completa/al/carpeta/archivo2.jpg
 ```sh
 ./main -d [carpeta] -o [archivo_zip] -s [tamaño] -e [contraseña_encriptacion]
 ```
+Para descomprimir y desencriptar:
 ```sh
 ./decompressor -i [carpeta_del_zip] -o [carpeta_output] -p [contraseña_encriptación]
 ```
+Para subir cualquier archivo a Google Drive:
+- Acceder a Google Cloud y obtener credentials.json
+```sh
+./drive [path_to_zip]
+```
+- Hacer click en el link y pegar el código de autorización.
 
 **Opciones:**
 - `-d` : Directorio a comprimir (default: `./test`)
