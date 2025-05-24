@@ -68,7 +68,7 @@ sudo apt-get install libzip-dev libssl-dev libcurl4-openssl-dev libjsoncpp-dev z
 
 - **[Funcionalidad de descompresión](./decompress.cpp):** Sistema completo para restaurar archivos respaldados, capaz de reconstruir archivos fragmentados a partir de múltiples partes ZIP.
 
-- **[Encriptación](./crypto.h):** Opción de cifrado AES para proteger la información utilizando una contraseña definida por el usuario.
+- **[Encriptación](./crypto.h):** Opción de cifrado XOR para proteger la información utilizando una contraseña definida por el usuario.
 
 ### Almacenamiento en la Nube
 
