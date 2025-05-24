@@ -187,6 +187,10 @@ bool processNormalFiles(vector<filesystem::path> &allFiles, size_t &fileIndex,
  */
 bool compressFolderToSplitZip(const string &folderPath,
                               const string &zipOutputPath, int maxSizeMB,
-                              const string &password = "");
+                              const string &password = "",
+                              bool useParallel = false);
 
+set<string> readIgnorePatterns(const string &folderPath);
+vector<filesystem::path> collectFiles(const string &folderPath,
+                                      const set<string> &ignorePatterns);
 #endif // COMPRESS_H

@@ -1,13 +1,13 @@
 # Compiler and flags
 CXX = g++
 CXXFLAGS = -std=c++17
-LDFLAGS = -lzip -lssl -lcrypto
+LDFLAGS = -lzip -lssl -lcrypto -fopenmp -lcurl -ljsoncpp
 
 # Target executables
 TARGETS = main descompresor
 
 # Source files
-SRCS_MAIN = main.cpp compress.cpp crypto.h
+SRCS_MAIN = main.cpp compress.cpp crypto.h dropbox_uploader.cpp
 SRCS_DECOMP = decompress.cpp crypto.h
 
 # Object files

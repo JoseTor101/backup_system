@@ -37,7 +37,8 @@ struct PartInfo {
 PartInfo parseInfoFile(const std::string &infoContent);
 
 /**
- * @brief Extrae un archivo específico de un ZIP a la ruta destino con opción de desencriptación
+ * @brief Extrae un archivo específico de un ZIP a la ruta destino con opción de
+ * desencriptación
  * @param archive Puntero al archivo ZIP abierto
  * @param zipPath Ruta del archivo dentro del ZIP
  * @param outputPath Ruta donde se extraerá el archivo

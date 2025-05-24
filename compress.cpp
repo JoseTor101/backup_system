@@ -1,11 +1,15 @@
 #include "crypto.h"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <omp.h>
 #include <set>
+#include <stdio.h>
 #include <string>
 #include <vector>
 #include <zip.h>
@@ -55,52 +59,33 @@ bool shouldIgnoreFile(const string &relativePath,
   return false;
 }
 
-// Función para leer patrones a ignorar desde un archivo .ignore
-set<string> readIgnorePatterns(const string &folderPath) {
-  set<string> ignorePatterns;
-
-  // Construir la ruta al archivo .ignore
-  filesystem::path ignoreFile = filesystem::path(folderPath) / ".ignore";
-
-  // Verificar si el archivo existe
-  if (filesystem::exists(ignoreFile)) {
-    cout << "Se encontró un archivo .ignore, omitiendo archivos listados."
-         << endl;
-
-    // Abrir el archivo para lectura
-    ifstream ignoreStream(ignoreFile);
-    string line;
-
-    // Leer línea por línea
-    while (getline(ignoreStream, line)) {
-      // Eliminar espacios en blanco al principio
-      line.erase(0, line.find_first_not_of(" \t\r\n"));
-
-      // Eliminar espacios en blanco al final
-      if (line.find_last_not_of(" \t\r\n") != string::npos)
-        line.erase(line.find_last_not_of(" \t\r\n") + 1);
-
-      // Ignorar líneas vacías y comentarios
-      if (!line.empty() && line[0] != '#') {
-        ignorePatterns.insert(line);
-        cout << "  - Ignorando: " << line << endl;
-      }
-    }
-  }
-
-  return ignorePatterns;
-}
-
 // Función para recolectar todos los archivos no ignorados en un directorio
 vector<filesystem::path> collectFiles(const string &folderPath,
                                       const set<string> &ignorePatterns) {
   vector<filesystem::path> allFiles;
 
-  // Recorrer recursivamente el directorio
+  // Recorrer el filesystem (aún secuencial) y guardar todos los archivos
+  // regulares
+  vector<filesystem::directory_entry> entries;
   for (const auto &entry :
        filesystem::recursive_directory_iterator(folderPath)) {
     if (entry.is_regular_file()) {
-      // Obtener la ruta relativa al directorio base
+      entries.push_back(entry);
+    }
+  }
+
+  // Filtrar en paralelo los archivos a ignorar
+  vector<filesystem::path> tempFiles;
+  std::mutex mtx;
+
+#pragma omp parallel
+  {
+    vector<filesystem::path> localFiles;
+
+#pragma omp for nowait // No necesita esperar que todos los hilos terminen el
+                       // bucle
+    for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+      const auto &entry = entries[i];
       string relativePath =
           filesystem::relative(entry.path(), folderPath).string();
 
@@ -116,12 +101,54 @@ vector<filesystem::path> collectFiles(const string &folderPath,
       }
 
       if (!shouldIgnore) {
-        allFiles.push_back(entry.path());
+        localFiles.push_back(entry.path());
       }
     }
+
+// Fusionar resultados en una sola lista con exclusión mutua
+#pragma omp critical // Protege esta sección para que solo un hilo a la vez
+                     // pueda ejecutarla
+    allFiles.insert(allFiles.end(), localFiles.begin(), localFiles.end());
   }
 
   return allFiles;
+}
+
+// función para leer patrones a ignorar desde un archivo .ignore
+set<string> readIgnorePatterns(const string &folderPath) {
+  set<string> patterns;
+
+  // Ruta del archivo .ignore
+  filesystem::path ignorePath = filesystem::path(folderPath) / ".ignore";
+
+  // Verificar si existe el archivo .ignore
+  if (filesystem::exists(ignorePath)) {
+    cout << "Leyendo patrones de ignorar desde " << ignorePath << endl;
+
+    // Leer el archivo línea por línea
+    ifstream ignoreFile(ignorePath);
+    string line;
+    while (getline(ignoreFile, line)) {
+      // Eliminar espacios en blanco al principio y al final
+      line.erase(0, line.find_first_not_of(" \t\r\n"));
+      line.erase(line.find_last_not_of(" \t\r\n") + 1);
+
+      // Ignorar líneas vacías y comentarios
+      if (line.empty() || line[0] == '#') {
+        continue;
+      }
+
+      patterns.insert(line);
+    }
+
+    cout << "Se cargaron " << patterns.size() << " patrones para ignorar."
+         << endl;
+  } else {
+    cout << "No se encontró archivo .ignore, no se ignorará ningún archivo."
+         << endl;
+  }
+
+  return patterns;
 }
 
 // Función mejorada para añadir un buffer de memoria a un ZIP con opción de
@@ -338,7 +365,7 @@ int calculateTotalParts(const vector<filesystem::path> &allFiles,
   return totalParts;
 }
 
-// Versión unificada corregida para procesar archivos grandes
+// Versión optimizada para procesar archivos grandes con paralelismo eficiente
 bool processLargeFile(const filesystem::path &filePath,
                       const string &relativePath, const string &folderPath,
                       size_t maxSizeBytes, const string &baseName,
@@ -353,9 +380,9 @@ bool processLargeFile(const filesystem::path &filePath,
   cout << "  Archivo grande detectado: " << relativePath << " ("
        << (fileSize / 1024 / 1024) << "MB)" << endl;
 
-  // Calcular fragmentos necesarios
   int fragmentsNeeded =
       static_cast<int>((fileSize + maxSizeBytes - 1) / maxSizeBytes);
+  int startingPart = part + 1;
 
   // Actualizar totalParts si es necesario
   if (fragmentsNeeded > totalParts) {
@@ -365,118 +392,176 @@ bool processLargeFile(const filesystem::path &filePath,
   cout << "  Dividiendo en " << fragmentsNeeded << " archivos ZIP"
        << (isEncrypted ? " encriptados" : "") << "..." << endl;
 
-  // Procesar cada fragmento
-  bool fragmentSuccess = true;
-  ifstream largeFile(filePath.string(), ios::binary);
-  if (!largeFile) {
-    cerr << "  Error al abrir archivo grande: " << filePath << endl;
-    return false;
+  // Preparamos los argumentos para cada hilo
+  struct FragmentTask {
+    int fragNum;
+    streamsize offset;
+    streamsize bytesToRead;
+    string fragmentName;
+    int localPart;
+    string partFileName;
+    filesystem::path partPath;
+    bool success;
+    vector<char> buffer; // Cada tarea tiene su propio buffer
+  };
+
+  // Preparar todas las tareas antes de la ejecución paralela
+  vector<FragmentTask> tasks(fragmentsNeeded);
+  for (int fragNum = 0; fragNum < fragmentsNeeded; fragNum++) {
+    tasks[fragNum].fragNum = fragNum;
+    tasks[fragNum].offset = fragNum * maxSizeBytes;
+    tasks[fragNum].bytesToRead = min(
+        maxSizeBytes, static_cast<size_t>(fileSize - tasks[fragNum].offset));
+    tasks[fragNum].localPart = startingPart + fragNum;
+    tasks[fragNum].fragmentName = relativePath + ".fragment" +
+                                  to_string(fragNum + 1) + "_of_" +
+                                  to_string(fragmentsNeeded);
+    tasks[fragNum].partFileName = baseName + "_part" +
+                                  to_string(tasks[fragNum].localPart) + "_of_" +
+                                  to_string(totalParts) + extension;
+    tasks[fragNum].partPath = outputDir / tasks[fragNum].partFileName;
+    tasks[fragNum].success = true;
+    tasks[fragNum].buffer.resize(
+        tasks[fragNum].bytesToRead); // Pre-asignar el buffer
   }
 
-  char *buffer = new char[maxSizeBytes];
+// MEJORA 1: Usar lecturas directas del sistema operativo para cada fragmento
+#pragma omp parallel for schedule(dynamic)
+  for (int i = 0; i < fragmentsNeeded; i++) {
+    // Abrir el archivo de forma independiente para cada fragmento (evita la
+    // contención del mutex)
+    FILE *file = fopen(filePath.string().c_str(), "rb");
+    if (!file) {
+#pragma omp critical
+      cerr << "  Error al abrir archivo grande para el fragmento " << i + 1
+           << endl;
+      tasks[i].success = false;
+      continue;
+    }
 
-  for (int fragNum = 0; fragNum < fragmentsNeeded && fragmentSuccess;
-       fragNum++) {
-    part++;
-    string partFileName = baseName + "_part" + to_string(part) + "_of_" +
-                          to_string(totalParts) + extension;
-    filesystem::path partPath = outputDir / partFileName;
+    // Posicionar y leer directamente
+    if (fseeko(file, tasks[i].offset, SEEK_SET) != 0 ||
+        fread(tasks[i].buffer.data(), 1, tasks[i].bytesToRead, file) !=
+            tasks[i].bytesToRead) {
+#pragma omp critical
+      cerr << "  Error al leer fragmento " << i + 1 << endl;
+      tasks[i].success = false;
+      fclose(file);
+      continue;
+    }
 
-    cout << "  Creando parte " << part << " para fragmento " << (fragNum + 1)
-         << " de " << fragmentsNeeded << endl;
+    fclose(file);
 
-    // Abrir archivo ZIP
+#pragma omp critical
+    cout << "    Fragmento " << i + 1 << " leído correctamente ("
+         << tasks[i].bytesToRead / 1024 << "KB)" << endl;
+  }
+
+  // MEJORA 2: Optimizar la creación de archivos ZIP y encriptación
+  std::atomic<bool> atomicSuccess{true};
+  std::atomic<int> completedFragments{0};
+
+  // MEJORA 3: Ajustar dinámicamente la granularidad
+  int chunksPerThread =
+      std::max(1, fragmentsNeeded / (omp_get_max_threads() * 2));
+
+#pragma omp parallel for schedule(dynamic, chunksPerThread)
+  for (int i = 0; i < fragmentsNeeded; i++) {
+    // Si la lectura falló, omitir este fragmento
+    if (!tasks[i].success)
+      continue;
+
+    // Crear archivo ZIP
     int zip_error = 0;
-    zip_t *archive = zip_open(partPath.string().c_str(),
+    zip_t *archive = zip_open(tasks[i].partPath.string().c_str(),
                               ZIP_CREATE | ZIP_TRUNCATE, &zip_error);
     if (!archive) {
       char errstr[128];
       zip_error_to_str(errstr, sizeof(errstr), zip_error, errno);
-      cerr << "No se pudo crear el archivo ZIP: " << partPath << " - " << errstr
-           << endl;
-      overallSuccess = false;
-      fragmentSuccess = false;
+#pragma omp critical
+      cerr << "No se pudo crear el archivo ZIP: " << tasks[i].partPath << " - "
+           << errstr << endl;
+      tasks[i].success = false;
+      atomicSuccess = false;
       continue;
     }
 
-    // Leer un fragmento del archivo
-    streamsize bytesToRead = min(
-        maxSizeBytes, static_cast<size_t>(fileSize - (fragNum * maxSizeBytes)));
-
-    largeFile.seekg(fragNum * maxSizeBytes);
-    if (!largeFile.read(buffer, bytesToRead)) {
-      cerr << "Error al leer fragmento del archivo: " << filePath << endl;
-      overallSuccess = false;
-      fragmentSuccess = false;
-      zip_close(archive);
-      break;
-    }
-
-    // Crear nombre para este fragmento
-    string fragmentName = relativePath + ".fragment" + to_string(fragNum + 1) +
-                          "_of_" + to_string(fragmentsNeeded);
-
-    // Añadir fragmento al ZIP usando la función adecuada
-    bool success = false;
+    // MEJORA 4: Encriptación más eficiente
+    bool addSuccess = false;
     if (isEncrypted) {
-      success = addEncryptedBufferToZip(archive, buffer, bytesToRead,
-                                        fragmentName, password, true, true,
-                                        &overallSuccess, &fragmentSuccess);
+      // Encriptar solo el buffer ya cargado
+      addSuccess = addEncryptedBufferToZip(
+          archive, tasks[i].buffer.data(), tasks[i].buffer.size(),
+          tasks[i].fragmentName, password, true, false);
     } else {
-      success = addBufferToZip(archive, buffer, bytesToRead, fragmentName, true,
-                               true, &overallSuccess, &fragmentSuccess);
+      addSuccess = addBufferToZip(archive, tasks[i].buffer.data(),
+                                  tasks[i].buffer.size(), tasks[i].fragmentName,
+                                  true, false);
     }
 
-    if (!success) {
+    // Liberar memoria del buffer una vez que se haya utilizado
+    vector<char>().swap(tasks[i].buffer);
+
+    if (!addSuccess) {
       zip_close(archive);
-      break;
+      tasks[i].success = false;
+      atomicSuccess = false;
+      continue;
     }
 
-    // Añadir archivo .info al ZIP (sin encriptar)
+    // Crear y añadir archivo .info
     ostringstream fragInfoContent;
-    fragInfoContent << totalParts << "\n";
-    fragInfoContent << part << "\n";
-
-    // Añadir info de encriptación si corresponde
+    fragInfoContent << totalParts << "\n" << tasks[i].localPart << "\n";
     if (isEncrypted) {
       fragInfoContent << "encrypted: " << crypto.generatePasswordHash(password)
                       << "\n";
     }
+    fragInfoContent << tasks[i].fragmentName << " | " << filePath.string()
+                    << "\n";
 
-    fragInfoContent << fragmentName << " | " << filePath.string() << "\n";
-
-    if (!addBufferToZip(archive, fragInfoContent.str().data(),
-                        fragInfoContent.str().size(),
-                        "part_" + to_string(part) + ".info", true, true)) {
-      cerr << "  Error al agregar archivo de información" << endl;
-      overallSuccess = false;
-      fragmentSuccess = false;
+    string infoStr = fragInfoContent.str();
+    if (!addBufferToZip(archive, infoStr.data(), infoStr.size(),
+                        "part_" + to_string(tasks[i].localPart) + ".info", true,
+                        true)) {
+#pragma omp critical
+      cerr << "  Error al agregar archivo de información al fragmento "
+           << tasks[i].fragNum << endl;
+      tasks[i].success = false;
+      atomicSuccess = false;
     }
 
-    cout << "    Fragmento " << (fragNum + 1) << " de " << fragmentsNeeded
-         << " (" << (bytesToRead / 1024) << "KB)" << endl;
-
-    totalFragments++;
-
-    // Cerrar el archivo ZIP
     if (zip_close(archive) < 0) {
-      cerr << "Error al cerrar el archivo ZIP: " << partPath << endl;
-      overallSuccess = false;
-      fragmentSuccess = false;
+#pragma omp critical
+      cerr << "Error al cerrar el archivo ZIP: " << tasks[i].partPath << endl;
+      tasks[i].success = false;
+      atomicSuccess = false;
+    }
+
+    // Incrementar contador de fragmentos completados y mostrar progreso
+    int completed = ++completedFragments;
+#pragma omp critical
+    {
+      cout << "    Fragmento " << tasks[i].fragNum + 1 << " de "
+           << fragmentsNeeded << " (" << (tasks[i].bytesToRead / 1024)
+           << "KB) completado - Progreso: " << completed << "/"
+           << fragmentsNeeded << endl;
     }
   }
 
-  delete[] buffer;
+  // MEJORA 5: Eliminar dependencias y actualizar contadores más eficientemente
+  part += fragmentsNeeded;
+  totalFragments += fragmentsNeeded;
 
-  if (!fragmentSuccess) {
+  // Verificar resultado final
+  overallSuccess = atomicSuccess;
+  if (!overallSuccess) {
     cerr << "Error al fragmentar el archivo " << filePath << endl;
   } else {
     cout << "  Archivo fragmentado correctamente: " << relativePath << endl;
   }
 
-  return fragmentSuccess;
+  return overallSuccess;
 }
-
 bool processNormalFiles(vector<filesystem::path> &allFiles, size_t &fileIndex,
                         const string &folderPath, size_t maxSizeBytes,
                         const string &baseName, const string &extension,
@@ -582,10 +667,10 @@ bool processNormalFiles(vector<filesystem::path> &allFiles, size_t &fileIndex,
   return partSuccess;
 }
 
-// Función principal unificada
+// Función principal unificada con soporte explícito para control de paralelismo
 bool compressFolderToSplitZip(const string &folderPath,
                               const string &zipOutputPath, int maxSizeMB,
-                              const string &password = "") {
+                              const string &password, bool useParallel) {
 
   bool isEncrypted = !password.empty();
 
@@ -604,12 +689,30 @@ bool compressFolderToSplitZip(const string &folderPath,
   // excluirse)
   set<string> ignorePatterns = readIgnorePatterns(folderPath);
 
+  // Configurar el número de hilos basado en el parámetro useParallel
+  int originalMaxThreads = omp_get_max_threads();
+  if (!useParallel) {
+    omp_set_num_threads(1); // Forzar ejecución serial
+    cout << "Modo serial activado (sin paralelismo)" << endl;
+  } else {
+    cout << "Modo paralelo activado con " << originalMaxThreads << " hilos"
+         << endl;
+
+    // Opcional: Ajustar la política de planificación de OpenMP para mejor
+    // rendimiento
+    omp_set_schedule(omp_sched_dynamic, 0);
+  }
+
   // Guardar la ruta de los archivos a comprimir
   vector<filesystem::path> allFiles = collectFiles(folderPath, ignorePatterns);
 
   // Verificar si hay archivos para comprimir
   if (allFiles.empty()) {
     cerr << "No hay archivos para comprimir" << endl;
+    // Restaurar configuración original de hilos
+    if (!useParallel) {
+      omp_set_num_threads(originalMaxThreads);
+    }
     return false;
   }
 
@@ -619,7 +722,8 @@ bool compressFolderToSplitZip(const string &folderPath,
          << endl;
   }
 
-  cout << "Total de archivos a comprimir: " << allFiles.size() << endl;
+  cout << "Total de archivos a comprimir: " << allFiles.size()
+       << (useParallel ? " (usando paralelismo)" : " (modo serial)") << endl;
 
   // Crear la base para los nombres de archivo de salida
   filesystem::path baseOutputPath(zipOutputPath);
@@ -653,8 +757,33 @@ bool compressFolderToSplitZip(const string &folderPath,
     string relativePath =
         filesystem::relative(allFiles[fileIndex], folderPath).string();
 
-    // Si es un archivo grande
+    // Si es un archivo grande, procesar con o sin paralelismo según el
+    // parámetro useParallel
     if (nextFileSize > maxSizeBytes) {
+      if (!useParallel) {
+// Garantizar que las directivas paralelas en processLargeFile no tengan efecto
+#pragma omp parallel num_threads(1)
+        {
+#pragma omp master
+          {
+            if (omp_get_num_threads() > 1) {
+              cerr << "Error: El paralelismo no se desactivó correctamente"
+                   << endl;
+            }
+          }
+        }
+      } else {
+        // Configuración óptima para archivos grandes cuando se usa paralelismo
+        int chunkSize = 0; // 0 significa que OpenMP decide automáticamente
+        omp_set_schedule(omp_sched_dynamic, chunkSize);
+      }
+
+      // Procesar el archivo grande (la función interna respetará la
+      // configuración de hilos)
+      cout << "Procesando archivo grande"
+           << (useParallel ? " con paralelismo..." : " en modo secuencial...")
+           << endl;
+
       bool result = processLargeFile(allFiles[fileIndex], relativePath,
                                      folderPath, maxSizeBytes, baseName,
                                      extension, outputDir, part, totalParts,
@@ -677,6 +806,11 @@ bool compressFolderToSplitZip(const string &folderPath,
          << " fragmentos de archivos grandes)";
   }
   cout << "." << endl;
+
+  // Restaurar configuración original de hilos al finalizar
+  if (!useParallel) {
+    omp_set_num_threads(originalMaxThreads);
+  }
 
   return overallSuccess;
 }
